@@ -367,7 +367,8 @@ async function processSingleFile(file) {
       const outFilename = `${baseName}.${outExt}`;
 
       resultFilename.textContent = outFilename;
-      resultFormat.textContent = `${exportFormat.toUpperCase()} (${exportFormat === 'png' ? 'Lossless' : 'Export'})`;
+      const isLossy = exportFormat === 'jpeg' || exportFormat === 'webp';
+      resultFormat.textContent = `${exportFormat.toUpperCase()} (${isLossy ? 'Lossy Q=95' : 'Lossless Bit-Exact'})`;
       resultDimensions.textContent = `${decoded.width} \u00D7 ${decoded.height} px`;
       resultSize.textContent = formatBytes(targetBytes);
       resultBytes.textContent = `${formatNumber(targetBytes)} bytes`;
