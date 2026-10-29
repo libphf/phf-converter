@@ -638,7 +638,7 @@ body {
   position: relative;
   width: 100%;
   min-height: 380px;
-  max-height: 540px;
+  max-height: 560px;
   background: #000;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-accent);
@@ -648,35 +648,49 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  touch-action: none;
+}
+
+.split-canvas-wrapper {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  max-width: 100%;
+  max-height: 540px;
 }
 
 .split-canvas {
+  grid-area: 1 / 1;
   max-width: 100%;
-  max-height: 520px;
+  max-height: 540px;
   height: auto;
   object-fit: contain;
   display: block;
+  user-select: none;
+  pointer-events: none;
 }
 
-.split-clipper {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 50%;
-  height: 100%;
-  overflow: hidden;
-  border-right: 2px solid var(--primary);
+.split-canvas.result-layer {
+  z-index: 1;
+}
+
+.split-canvas.orig-layer {
+  z-index: 2;
+  /* Clips from the right, revealing original on the left */
+  clip-path: inset(0 calc(100% - var(--split-pct, 50%)) 0 0);
 }
 
 .slider-divider {
   position: absolute;
   top: 0;
-  left: 50%;
+  bottom: 0;
+  left: var(--split-pct, 50%);
   width: 2px;
-  height: 100%;
   background: var(--primary);
   transform: translateX(-50%);
+  z-index: 3;
   pointer-events: none;
+  box-shadow: 0 0 10px var(--primary-glow);
 }
 
 .slider-handle {
@@ -694,6 +708,7 @@ body {
   justify-content: center;
   box-shadow: 0 0 16px var(--primary-glow);
   pointer-events: auto;
+  cursor: ew-resize;
 }
 
 .split-tag {

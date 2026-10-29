@@ -40,7 +40,7 @@ const btnResetView = document.getElementById('btnResetView');
 const sideBySideContainer = document.getElementById('sideBySideContainer');
 const splitSliderContainer = document.getElementById('splitSliderContainer');
 const splitViewport = document.getElementById('splitViewport');
-const splitClipper = document.getElementById('splitClipper');
+const splitCanvasWrapper = document.getElementById('splitCanvasWrapper');
 const sliderDivider = document.getElementById('sliderDivider');
 
 const origCanvas = document.getElementById('origCanvas');
@@ -504,17 +504,22 @@ function updateSplitCanvases(srcCanvas1, srcCanvas2) {
   splitResultCanvas.height = srcCanvas2.height;
   const ctx2 = splitResultCanvas.getContext('2d');
   ctx2.drawImage(srcCanvas2, 0, 0);
+
+  if (splitCanvasWrapper) {
+    splitCanvasWrapper.style.setProperty('--split-pct', '50%');
+  }
 }
 
 let isDraggingSlider = false;
 
 function setSliderPosition(clientX) {
-  const rect = splitViewport.getBoundingClientRect();
+  if (!splitCanvasWrapper) return;
+  const rect = splitCanvasWrapper.getBoundingClientRect();
+  if (rect.width <= 0) return;
   let x = clientX - rect.left;
-  x = Math.max(0, Math.min(x, rect.width));
-  const pct = (x / rect.width) * 100;
-  splitClipper.style.width = `${pct}%`;
-  sliderDivider.style.left = `${pct}%`;
+  let pct = (x / rect.width) * 100;
+  pct = Math.max(0, Math.min(100, pct));
+  splitCanvasWrapper.style.setProperty('--split-pct', `${pct}%`);
 }
 
 splitViewport.addEventListener('pointerdown', (e) => {
@@ -551,13 +556,17 @@ btnViewSplit.addEventListener('click', () => {
   btnViewSide.classList.remove('active');
   sideBySideContainer.hidden = true;
   splitSliderContainer.hidden = false;
-  setSliderPosition(splitViewport.getBoundingClientRect().left + splitViewport.getBoundingClientRect().width / 2);
+  if (splitCanvasWrapper) {
+    splitCanvasWrapper.style.setProperty('--split-pct', '50%');
+  }
 });
 
 btnResetView.addEventListener('click', () => {
   origCanvas.style.transform = 'none';
   resultCanvas.style.transform = 'none';
-  setSliderPosition(splitViewport.getBoundingClientRect().left + splitViewport.getBoundingClientRect().width / 2);
+  if (splitCanvasWrapper) {
+    splitCanvasWrapper.style.setProperty('--split-pct', '50%');
+  }
 });
 
 // ----------------------------------------------------
