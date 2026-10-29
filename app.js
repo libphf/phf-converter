@@ -263,13 +263,41 @@ function encodeToPHF(imageData, modeOption = 0, effortOption = 0, channelPolicy 
 // RAW Image Parser (Canon .CR2, .NEF, .ARW, .DNG)
 // Extracts high-resolution embedded preview from TIFF/RAW container
 // ----------------------------------------------------
+function inspectJpegHeader(u8, offset, length) {
+  let pos = offset + 2;
+  const end = Math.min(u8.byteLength, offset + length);
+  while (pos < end - 8) {
+    if (u8[pos] === 0xFF) {
+      const marker = u8[pos + 1];
+      if (marker === 0xD9) break; // EOI
+      // SOF0 (0xC0 baseline DCT) or SOF2 (0xC2 progressive DCT) - standard viewable JPEG
+      if (marker === 0xC0 || marker === 0xC2) {
+        const h = (u8[pos + 5] << 8) | u8[pos + 6];
+        const w = (u8[pos + 7] << 8) | u8[pos + 8];
+        return { valid: true, width: w, height: h };
+      }
+      // SOF3 (0xC3) - ITU-T81 lossless JPEG (used for raw Bayer sensor data, rejected by browser)
+      if (marker === 0xC3) {
+        return { valid: false, reason: 'Lossless JPEG sensor stream' };
+      }
+      if (pos + 3 >= end) break;
+      const segLen = (u8[pos + 2] << 8) | u8[pos + 3];
+      if (segLen < 2) break;
+      pos += 2 + segLen;
+    } else {
+      pos++;
+    }
+  }
+  return { valid: false, reason: 'No valid SOF found' };
+}
+
 function extractImageFromRaw(arrayBuffer) {
   const u8 = new Uint8Array(arrayBuffer);
   if (u8.byteLength < 16) return null;
 
-  // Check TIFF byte order magic
-  const isLE = u8[0] === 0x49 && u8[1] === 0x49; // 'II' (Intel little-endian)
-  const isBE = u8[0] === 0x4D && u8[1] === 0x4D; // 'MM' (Motorola big-endian)
+  // Check TIFF byte order magic ('II' = little-endian, 'MM' = big-endian)
+  const isLE = u8[0] === 0x49 && u8[1] === 0x49;
+  const isBE = u8[0] === 0x4D && u8[1] === 0x4D;
   if (!isLE && !isBE) return null;
 
   const dv = new DataView(arrayBuffer);
@@ -295,7 +323,10 @@ function extractImageFromRaw(arrayBuffer) {
 
       if (offset > 0 && length > 5000 && offset + length <= arrayBuffer.byteLength) {
         if (u8[offset] === 0xFF && u8[offset + 1] === 0xD8) {
-          candidates.push({ offset, length });
+          const info = inspectJpegHeader(u8, offset, length);
+          if (info.valid && info.width > 0 && info.height > 0) {
+            candidates.push({ offset, length, width: info.width, height: info.height, pixels: info.width * info.height });
+          }
         }
       }
 
@@ -312,12 +343,16 @@ function extractImageFromRaw(arrayBuffer) {
 
   // Fallback: fast scan for embedded JPEG SOI/EOI
   if (candidates.length === 0) {
-    const scanLimit = Math.min(u8.byteLength - 4, 1500000);
+    const scanLimit = Math.min(u8.byteLength - 4, 25000000);
     for (let i = 0; i < scanLimit; i++) {
       if (u8[i] === 0xFF && u8[i+1] === 0xD8 && u8[i+2] === 0xFF) {
         for (let j = i + 5000; j < Math.min(u8.byteLength - 1, i + 25000000); j++) {
           if (u8[j] === 0xFF && u8[j+1] === 0xD9) {
-            candidates.push({ offset: i, length: (j + 2) - i });
+            const length = (j + 2) - i;
+            const info = inspectJpegHeader(u8, i, length);
+            if (info.valid && info.width > 0 && info.height > 0) {
+              candidates.push({ offset: i, length, width: info.width, height: info.height, pixels: info.width * info.height });
+            }
             i = j + 2;
             break;
           }
@@ -327,8 +362,8 @@ function extractImageFromRaw(arrayBuffer) {
   }
 
   if (candidates.length > 0) {
-    // Sort descending to get the largest (highest-resolution) JPEG preview
-    candidates.sort((a, b) => b.length - a.length);
+    // Sort descending by resolution (pixels), then by length
+    candidates.sort((a, b) => b.pixels - a.pixels || b.length - a.length);
     const best = candidates[0];
     const jpegBytes = u8.subarray(best.offset, best.offset + best.length);
     return new Blob([jpegBytes], { type: 'image/jpeg' });
@@ -374,17 +409,103 @@ async function loadStandardImageToImageData(fileOrBlob) {
 }
 
 // ----------------------------------------------------
+// Windows BMP (24-bit Uncompressed) Encoder
+// ----------------------------------------------------
+function encodeBmp(imageData) {
+  const width = imageData.width;
+  const height = imageData.height;
+  const data = imageData.data;
+  const rowStride = Math.floor((width * 3 + 3) / 4) * 4;
+  const padding = rowStride - width * 3;
+  const pixelDataSize = rowStride * height;
+  const fileSize = 54 + pixelDataSize;
+  const buf = new Uint8Array(fileSize);
+  const dv = new DataView(buf.buffer);
+
+  // BITMAPFILEHEADER (14 bytes)
+  dv.setUint16(0, 0x4D42, false); // 'BM'
+  dv.setUint32(2, fileSize, true);
+  dv.setUint16(6, 0, true);
+  dv.setUint16(8, 0, true);
+  dv.setUint32(10, 54, true); // Offset to pixel data
+
+  // BITMAPINFOHEADER (40 bytes)
+  dv.setUint32(14, 40, true); // biSize
+  dv.setInt32(18, width, true); // biWidth
+  dv.setInt32(22, height, true); // biHeight (positive = bottom-up)
+  dv.setUint16(26, 1, true); // biPlanes
+  dv.setUint16(28, 24, true); // biBitCount (24-bit BGR)
+  dv.setUint32(30, 0, true); // biCompression (BI_RGB)
+  dv.setUint32(34, pixelDataSize, true); // biSizeImage
+  dv.setInt32(38, 2835, true); // biXPelsPerMeter (72 DPI)
+  dv.setInt32(42, 2835, true); // biYPelsPerMeter
+  dv.setUint32(46, 0, true); // biClrUsed
+  dv.setUint32(50, 0, true); // biClrImportant
+
+  let outPos = 54;
+  for (let y = height - 1; y >= 0; y--) {
+    const rowStart = y * width * 4;
+    for (let x = 0; x < width; x++) {
+      const idx = rowStart + (x * 4);
+      buf[outPos++] = data[idx + 2]; // B
+      buf[outPos++] = data[idx + 1]; // G
+      buf[outPos++] = data[idx];     // R
+    }
+    for (let p = 0; p < padding; p++) {
+      buf[outPos++] = 0;
+    }
+  }
+
+  return new Blob([buf], { type: 'image/bmp' });
+}
+
+// ----------------------------------------------------
+// Export Format Resolver
+// ----------------------------------------------------
+function getExportDetails(format) {
+  switch (format) {
+    case 'webp-lossless':
+      return { ext: 'webp', label: 'WebP (Lossless \u2022 Bit-Exact)', isLossy: false };
+    case 'bmp':
+      return { ext: 'bmp', label: 'BMP (Lossless \u2022 24-bit)', isLossy: false };
+    case 'jpeg':
+      return { ext: 'jpg', label: 'JPEG (Lossy Q=95)', isLossy: true };
+    case 'webp':
+      return { ext: 'webp', label: 'WebP (Lossy Q=95)', isLossy: true };
+    case 'png':
+    default:
+      return { ext: 'png', label: 'PNG (Lossless \u2022 Bit-Exact)', isLossy: false };
+  }
+}
+
+// ----------------------------------------------------
 // Canvas to Blob Exporter
 // ----------------------------------------------------
-function canvasToBlob(canvas, format = 'png', quality = 0.95) {
+async function canvasToBlob(canvas, format = 'png') {
+  if (format === 'bmp') {
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    return encodeBmp(imgData);
+  }
+
   let mime = 'image/png';
-  if (format === 'webp') mime = 'image/webp';
-  else if (format === 'jpeg' || format === 'jpg') mime = 'image/jpeg';
+  let quality = 0.95;
+
+  if (format === 'webp-lossless') {
+    mime = 'image/webp';
+    quality = 1.0; // 1.0 instructs Chromium / Skia to encode in Lossless WebP mode
+  } else if (format === 'webp') {
+    mime = 'image/webp';
+    quality = 0.95;
+  } else if (format === 'jpeg' || format === 'jpg') {
+    mime = 'image/jpeg';
+    quality = 0.95;
+  }
 
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (blob) resolve(blob);
-      else reject(new Error('Failed to convert canvas to blob'));
+      else reject(new Error(`Failed to convert canvas to ${mime}`));
     }, mime, quality);
   });
 }
@@ -428,9 +549,10 @@ async function processSingleFile(file) {
       origSize.textContent = formatBytes(originalByteCount);
       origBytes.textContent = `${formatNumber(originalByteCount)} bytes`;
 
-      // Export to chosen format (PNG/WebP/JPEG)
+      // Export to chosen format (PNG/WebP/BMP/JPEG)
       const exportFormat = optExportFormat.value;
-      progressText.textContent = `Exporting to ${exportFormat.toUpperCase()}...`;
+      const exportDetails = getExportDetails(exportFormat);
+      progressText.textContent = `Exporting to ${exportDetails.ext.toUpperCase()}...`;
 
       resultCanvas.width = decoded.width;
       resultCanvas.height = decoded.height;
@@ -441,12 +563,10 @@ async function processSingleFile(file) {
       const targetBytes = targetBlob.size;
 
       const baseName = file.name.replace(/\.[^/.]+$/, '');
-      const outExt = exportFormat === 'jpeg' ? 'jpg' : exportFormat;
-      const outFilename = `${baseName}.${outExt}`;
+      const outFilename = `${baseName}.${exportDetails.ext}`;
 
       resultFilename.textContent = outFilename;
-      const isLossy = exportFormat === 'jpeg' || exportFormat === 'webp';
-      resultFormat.textContent = `${exportFormat.toUpperCase()} (${isLossy ? 'Lossy Q=95' : 'Lossless Bit-Exact'})`;
+      resultFormat.textContent = exportDetails.label;
       resultDimensions.textContent = `${decoded.width} \u00D7 ${decoded.height} px`;
       resultSize.textContent = formatBytes(targetBytes);
       resultBytes.textContent = `${formatNumber(targetBytes)} bytes`;
@@ -715,10 +835,11 @@ async function processBatch(files) {
 
         thumbUrl = tempCanvas.toDataURL('image/jpeg', 0.6);
         const exportFormat = optExportFormat.value;
+        const exportDetails = getExportDetails(exportFormat);
         outBlob = await canvasToBlob(tempCanvas, exportFormat);
         outSize = outBlob.size;
         const base = file.name.replace(/\.[^/.]+$/, '');
-        outName = `${base}.${exportFormat === 'jpeg' ? 'jpg' : exportFormat}`;
+        outName = `${base}.${exportDetails.ext}`;
       } else {
         const ext = file.name.split('.').pop().toLowerCase();
         const isRaw = ['cr2', 'raw', 'nef', 'arw', 'dng'].includes(ext);
