@@ -260,6 +260,84 @@ function encodeToPHF(imageData, modeOption = 0, effortOption = 0, channelPolicy 
 }
 
 // ----------------------------------------------------
+// RAW Image Parser (Canon .CR2, .NEF, .ARW, .DNG)
+// Extracts high-resolution embedded preview from TIFF/RAW container
+// ----------------------------------------------------
+function extractImageFromRaw(arrayBuffer) {
+  const u8 = new Uint8Array(arrayBuffer);
+  if (u8.byteLength < 16) return null;
+
+  // Check TIFF byte order magic
+  const isLE = u8[0] === 0x49 && u8[1] === 0x49; // 'II' (Intel little-endian)
+  const isBE = u8[0] === 0x4D && u8[1] === 0x4D; // 'MM' (Motorola big-endian)
+  if (!isLE && !isBE) return null;
+
+  const dv = new DataView(arrayBuffer);
+  let candidates = [];
+
+  // Parse TIFF IFD entries
+  try {
+    let ifdOffset = dv.getUint32(4, isLE);
+    let ifdIndex = 0;
+    while (ifdOffset > 0 && ifdOffset < arrayBuffer.byteLength - 2 && ifdIndex < 8) {
+      const numEntries = dv.getUint16(ifdOffset, isLE);
+      let p = ifdOffset + 2;
+      let offset = 0;
+      let length = 0;
+
+      for (let i = 0; i < numEntries && p + 12 <= arrayBuffer.byteLength; i++) {
+        const tag = dv.getUint16(p, isLE);
+        const val = dv.getUint32(p + 8, isLE);
+        if (tag === 0x0111 || tag === 0x0201) offset = val; // StripOffsets / JPEGInterchangeFormat
+        if (tag === 0x0117 || tag === 0x0202) length = val; // StripByteCounts / JPEGInterchangeFormatLength
+        p += 12;
+      }
+
+      if (offset > 0 && length > 5000 && offset + length <= arrayBuffer.byteLength) {
+        if (u8[offset] === 0xFF && u8[offset + 1] === 0xD8) {
+          candidates.push({ offset, length });
+        }
+      }
+
+      if (p + 4 <= arrayBuffer.byteLength) {
+        ifdOffset = dv.getUint32(p, isLE);
+      } else {
+        break;
+      }
+      ifdIndex++;
+    }
+  } catch (e) {
+    console.warn('[RAW IFD Parser Warning]', e);
+  }
+
+  // Fallback: fast scan for embedded JPEG SOI/EOI
+  if (candidates.length === 0) {
+    const scanLimit = Math.min(u8.byteLength - 4, 1500000);
+    for (let i = 0; i < scanLimit; i++) {
+      if (u8[i] === 0xFF && u8[i+1] === 0xD8 && u8[i+2] === 0xFF) {
+        for (let j = i + 5000; j < Math.min(u8.byteLength - 1, i + 25000000); j++) {
+          if (u8[j] === 0xFF && u8[j+1] === 0xD9) {
+            candidates.push({ offset: i, length: (j + 2) - i });
+            i = j + 2;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (candidates.length > 0) {
+    // Sort descending to get the largest (highest-resolution) JPEG preview
+    candidates.sort((a, b) => b.length - a.length);
+    const best = candidates[0];
+    const jpegBytes = u8.subarray(best.offset, best.offset + best.length);
+    return new Blob([jpegBytes], { type: 'image/jpeg' });
+  }
+
+  return null;
+}
+
+// ----------------------------------------------------
 // Image File Loader (Standard Format -> ImageData)
 // ----------------------------------------------------
 async function loadStandardImageToImageData(fileOrBlob) {
@@ -403,12 +481,27 @@ async function processSingleFile(file) {
 
     } else {
       // ------------------------------------
-      // Direction: Standard Image -> PHF
+      // Direction: Standard Image or RAW -> PHF
       // ------------------------------------
-      directionTag.textContent = `${file.name.split('.').pop().toUpperCase()} \u2192 PHF`;
-      progressText.textContent = 'Decoding original image...';
+      const ext = file.name.split('.').pop().toLowerCase();
+      const isRaw = ['cr2', 'raw', 'nef', 'arw', 'dng'].includes(ext);
 
-      const { imageData, width, height } = await loadStandardImageToImageData(file);
+      directionTag.textContent = `${ext.toUpperCase()} \u2192 PHF`;
+      progressText.textContent = isRaw ? 'Parsing RAW container & extracting preview...' : 'Decoding original image...';
+
+      let inputBlob = file;
+      let formatLabel = file.type || `${ext.toUpperCase()} Image`;
+
+      if (isRaw) {
+        const extracted = extractImageFromRaw(arrayBuffer);
+        if (!extracted) {
+          throw new Error(`Failed to extract preview from ${ext.toUpperCase()} file`);
+        }
+        inputBlob = extracted;
+        formatLabel = `Canon RAW (${ext.toUpperCase()} \u2022 Full Preview)`;
+      }
+
+      const { imageData, width, height } = await loadStandardImageToImageData(inputBlob);
 
       // Render Original
       origCanvas.width = width;
@@ -417,7 +510,7 @@ async function processSingleFile(file) {
       ctxOrig.putImageData(imageData, 0, 0);
 
       origFilename.textContent = file.name;
-      origFormat.textContent = file.type || `${file.name.split('.').pop().toUpperCase()} Image`;
+      origFormat.textContent = formatLabel;
       origDimensions.textContent = `${width} \u00D7 ${height} px`;
       origSize.textContent = formatBytes(originalByteCount);
       origBytes.textContent = `${formatNumber(originalByteCount)} bytes`;
@@ -627,7 +720,15 @@ async function processBatch(files) {
         const base = file.name.replace(/\.[^/.]+$/, '');
         outName = `${base}.${exportFormat === 'jpeg' ? 'jpg' : exportFormat}`;
       } else {
-        const { imageData, width, height } = await loadStandardImageToImageData(file);
+        const ext = file.name.split('.').pop().toLowerCase();
+        const isRaw = ['cr2', 'raw', 'nef', 'arw', 'dng'].includes(ext);
+        let inputBlob = file;
+        if (isRaw) {
+          const extracted = extractImageFromRaw(arrayBuffer);
+          if (extracted) inputBlob = extracted;
+        }
+
+        const { imageData, width, height } = await loadStandardImageToImageData(inputBlob);
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = width;
         tempCanvas.height = height;

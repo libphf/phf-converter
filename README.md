@@ -7,7 +7,7 @@
 ## ✨ Features
 
 - **Bi-Directional Conversion**:
-  - **Images &rarr; PHF**: Converts PNG, JPEG, WebP, AVIF, GIF, BMP, and ICO into bit-exact lossless `.phf` files.
+  - **Images &rarr; PHF**: Converts PNG, JPEG, WebP, AVIF, GIF, BMP, ICO, and **Canon RAW (.CR2)** into bit-exact lossless `.phf` files.
   - **PHF &rarr; Images**: Decompresses `.phf` containers and exports to lossless PNG, WebP, or high-quality JPEG.
 - **100% Client-Side & Private**:
   - All compression and decompression executes directly in your browser through `phf.wasm`. No image data ever leaves your device.
